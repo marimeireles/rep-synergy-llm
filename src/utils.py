@@ -36,10 +36,13 @@ def load_model_and_tokenizer(model_name: str, device: torch.device = None):
         device = get_device()
 
     logger.info(f"Loading model: {model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # Use local_files_only when TRANSFORMERS_OFFLINE is set (compute nodes have no internet)
+    local_only = os.environ.get("TRANSFORMERS_OFFLINE", "0") == "1"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=local_only)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        dtype=torch.float32,
+        torch_dtype=torch.float32,
+        local_files_only=local_only,
     )
     model = model.to(device)
     model.eval()

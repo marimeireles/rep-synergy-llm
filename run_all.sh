@@ -23,6 +23,10 @@ micromamba activate syn
 # Fallback: ensure torch can find its bundled CUDA libraries
 export LD_LIBRARY_PATH=/home/marimeir/micromamba/envs/syn/lib/python3.10/site-packages/torch/lib:${LD_LIBRARY_PATH:-}
 
+# Compute nodes have no internet — force HuggingFace to use only cached files
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 cd /lustre07/scratch/marimeir/rep-synergy-llm
 
 # Ensure results directories exist

@@ -48,12 +48,13 @@ def main():
 
     # Initialize random model (same architecture, random weights)
     logger.info("Initializing Pythia-1B with random weights...")
-    config = AutoConfig.from_pretrained(CONFIG["model_name"])
+    local_only = os.environ.get("TRANSFORMERS_OFFLINE", "0") == "1"
+    config = AutoConfig.from_pretrained(CONFIG["model_name"], local_files_only=local_only)
     model = AutoModelForCausalLM.from_config(config)
     model = model.to(device)
     model.eval()
 
-    tokenizer = AutoTokenizer.from_pretrained(CONFIG["model_name"])
+    tokenizer = AutoTokenizer.from_pretrained(CONFIG["model_name"], local_files_only=local_only)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
