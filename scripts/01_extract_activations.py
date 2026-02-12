@@ -77,6 +77,13 @@ def main():
         json.dump(all_tokens, f)
     logger.info(f"Saved tokens to {tokens_path}")
 
+    # Save prompt token IDs (needed by ablation script)
+    prompt_token_ids = [tokenizer.encode(p) for p in PROMPTS]
+    prompt_ids_path = os.path.join(CONFIG["results_dir"], "activations", "pythia1b_prompt_token_ids.json")
+    with open(prompt_ids_path, 'w') as f:
+        json.dump(prompt_token_ids, f)
+    logger.info(f"Saved prompt token IDs to {prompt_ids_path}")
+
     # Verification
     expected = (60, CONFIG["num_total_heads"], CONFIG["num_tokens_to_generate"])
     assert all_activations.shape == expected, f"Unexpected shape: {all_activations.shape}, expected {expected}"
