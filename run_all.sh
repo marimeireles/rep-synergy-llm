@@ -14,11 +14,14 @@
 set -e  # Exit on error
 
 # Load CUDA/cuDNN modules (required on Narval compute nodes)
-module load cuda/12.2 cudnn/9.2.1.18
+module load StdEnv/2023 cudacore/.12.2.2 cudnn/9.2.1.18 2>/dev/null || true
 
 # Activate environment
 eval "$(micromamba shell hook --shell bash)"
 micromamba activate syn
+
+# Fallback: ensure torch can find its bundled CUDA libraries
+export LD_LIBRARY_PATH=/home/marimeir/micromamba/envs/syn/lib/python3.10/site-packages/torch/lib:${LD_LIBRARY_PATH:-}
 
 cd /lustre07/scratch/marimeir/rep-synergy-llm
 
