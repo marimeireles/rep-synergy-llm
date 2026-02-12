@@ -357,6 +357,7 @@ def compute_all_pairs_phiid(activations, num_heads, tau=1):
 - The 16 atoms are: `rtr, rtx, rty, rts, xtr, xtx, xty, xts, ytr, ytx, yty, yts, str, stx, sty, sts`
 - We only need `sts` (Syn→Syn) and `rtr` (Red→Red)
 - Only depends on numpy + scipy — purely CPU-bound, no GPU needed for PhiID
+- **VERIFY at test time**: The return type may be arrays (local values) or scalars depending on mode. `np.mean()` is safe either way (returns scalar on scalar input). But check the actual return shape in tests and log it.
 
 ### 2b. Create `tests/test_phiid.py`
 - Test that `calc_PhiID` runs without error on synthetic time series (two 1D arrays, tau=1)
@@ -368,7 +369,7 @@ def compute_all_pairs_phiid(activations, num_heads, tau=1):
 
 ### 2c. Create `scripts/02_compute_phiid.py`
 - Load activations from Phase 1
-- Compute PhiID for all 10,296 head pairs (averaged over 60 prompts each)
+- Compute PhiID for all 32,640 head pairs (averaged over 60 prompts each)
 - Save pairwise results to `results/phiid_scores/pythia1b_pairwise_phiid.npz`
 - Log progress (this will take a while — ~10K PhiID computations)
 - **Run tests first, then run this script**
