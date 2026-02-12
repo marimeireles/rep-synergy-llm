@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=phiid-synergy
-#SBATCH --account=def-bhavar11
+#SBATCH --account=def-zhijing_gpu
 #SBATCH --time=12:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16

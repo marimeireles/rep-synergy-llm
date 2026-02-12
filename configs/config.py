@@ -1,8 +1,8 @@
 CONFIG = {
     "model_name": "EleutherAI/pythia-1b",
     "num_layers": 16,
-    "num_heads_per_layer": 16,
-    "num_total_heads": 256,  # 16 * 16
+    "num_heads_per_layer": 8,
+    "num_total_heads": 128,  # 16 * 8
     "num_tokens_to_generate": 100,
     "seed": 42,
     "device": "auto",
