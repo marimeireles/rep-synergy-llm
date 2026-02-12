@@ -30,7 +30,12 @@ mkdir -p results/activations results/phiid_scores results/ablation results/figur
 
 echo "=== Starting pipeline at $(date) ==="
 echo "Node: $(hostname), GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
+echo "Python: $(which python)"
+python -c "import torch; print(f'torch {torch.__version__}, cuda: {torch.cuda.is_available()}, device_count: {torch.cuda.device_count()}')"
 echo ""
+
+# Unbuffer Python output for real-time monitoring
+export PYTHONUNBUFFERED=1
 
 # Phase 1: Extract activations (GPU)
 echo "=== Phase 1: Activation Extraction ==="
