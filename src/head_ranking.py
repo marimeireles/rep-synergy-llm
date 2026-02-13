@@ -1,8 +1,12 @@
 """
 Head ranking by synergy-redundancy score.
 
-For each head, average its synergy/redundancy across all pairs that include it,
-then compute syn_red_score = synergy_rank - redundancy_rank, min-max normalized.
+Supports two methods:
+1. 'rank_diff' (paper's stated method): rank(syn) - rank(red), min-max normalized
+2. 'pair_balance' (per-pair normalization): sts/(sts+rtr) per pair, then average per head
+
+The 'pair_balance' method removes the scale effect where both syn and red
+are inflated by total TDMI magnitude, producing clearer inverted-U profiles.
 """
 
 import logging
@@ -82,6 +86,41 @@ def compute_syn_red_rank(synergy_per_head, redundancy_per_head):
         syn_red_rank = np.full_like(raw_score, 0.5, dtype=float)
 
     return syn_red_rank, syn_rank, red_rank
+
+
+def compute_pair_balance_scores(sts_matrix, rtr_matrix, num_heads):
+    """
+    Per-pair balance method: normalize sts and rtr per pair before aggregating.
+
+    For each pair (i,j): balance(i,j) = sts(i,j) / (sts(i,j) + rtr(i,j))
+    For each head h: syn_score(h) = mean of balance(h,j) for all j != h
+
+    This removes the scale effect where both sts and rtr are inflated by
+    total TDMI (driven by autocorrelation), producing a cleaner signal.
+
+    Returns:
+        syn_score: np.ndarray (num_heads,) — per-head synergy fraction
+        syn_red_rank: np.ndarray (num_heads,) — min-max normalized to [0, 1]
+    """
+    denom = sts_matrix + rtr_matrix
+    denom[denom < 1e-10] = 1.0
+    balance = sts_matrix / denom
+
+    syn_score = np.zeros(num_heads)
+    for h in range(num_heads):
+        mask = np.ones(num_heads, dtype=bool)
+        mask[h] = False
+        syn_score[h] = np.mean(balance[h, mask])
+
+    # Min-max normalize
+    score_min = syn_score.min()
+    score_max = syn_score.max()
+    if score_max > score_min:
+        syn_red_rank = (syn_score - score_min) / (score_max - score_min)
+    else:
+        syn_red_rank = np.full_like(syn_score, 0.5, dtype=float)
+
+    return syn_score, syn_red_rank
 
 
 def build_ranking_dataframe(synergy_per_head, redundancy_per_head,
