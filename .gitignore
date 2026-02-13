@@ -7,4 +7,5 @@ wandb/
 .ipynb_checkpoints/
 *.pt
 *.bin
+slurm/
 .env

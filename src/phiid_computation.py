@@ -77,9 +77,10 @@ def compute_pairwise_phiid(activations, head_i, head_j, tau=1,
 def compute_all_pairs_phiid(activations, num_heads, tau=1,
                             kind="gaussian", redundancy="MMI",
                             max_workers=None, save_path=None,
-                            checkpoint_interval=5000):
+                            checkpoint_interval=5000,
+                            pair_range=None):
     """
-    Compute PhiID for ALL pairs of attention heads.
+    Compute PhiID for ALL (or a subset of) pairs of attention heads.
 
     Pythia-1B: 256 heads -> C(256,2) = 32,640 pairs.
     Each pair averaged over all prompts.
@@ -93,13 +94,24 @@ def compute_all_pairs_phiid(activations, num_heads, tau=1,
         max_workers: number of parallel workers (None = auto)
         save_path: if provided, save intermediate results
         checkpoint_interval: save checkpoint every N pairs
+        pair_range: optional (start, end) tuple to compute only a slice of
+                    the pair list. Used for multi-node chunked computation.
 
     Returns:
         sts_matrix: np.ndarray of shape (num_heads, num_heads) — synergy values
         rtr_matrix: np.ndarray of shape (num_heads, num_heads) — redundancy values
     """
-    pairs = list(combinations(range(num_heads), 2))
-    total_pairs = len(pairs)
+    all_pairs = list(combinations(range(num_heads), 2))
+
+    if pair_range is not None:
+        start, end = pair_range
+        pairs = all_pairs[start:end]
+        total_pairs = len(pairs)
+        logger.info(f"Chunk mode: computing pairs [{start}:{end}] "
+                    f"({total_pairs} of {len(all_pairs)} total)")
+    else:
+        pairs = all_pairs
+        total_pairs = len(pairs)
     logger.info(f"Computing PhiID for {total_pairs} head pairs with {max_workers} workers")
 
     sts_matrix = np.zeros((num_heads, num_heads))
