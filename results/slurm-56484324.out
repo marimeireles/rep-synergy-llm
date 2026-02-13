@@ -1,0 +1,24 @@
+=== Starting pipeline at Thu Feb 12 12:27:41 PM EST 2026 ===
+Node: ng10706, GPU: NVIDIA A100-SXM4-40GB
+Python: /home/marimeir/micromamba/envs/syn/bin/python
+torch 2.5.1, cuda: True, device_count: 1
+
+=== Phase 1: Activation Extraction ===
+Phase 1 done at Thu Feb 12 12:30:16 PM EST 2026
+
+=== Phase 2: PhiID Computation ===
+Phase 2 done at Thu Feb 12 12:48:21 PM EST 2026
+
+=== Phase 3: Head Ranking ===
+Phase 3 done at Thu Feb 12 12:48:27 PM EST 2026
+
+=== Phase 4: Ablation ===
+Phase 4 done at Thu Feb 12 01:14:14 PM EST 2026
+
+=== Phase 5: Random Baseline ===
+Phase 5 done at Thu Feb 12 01:37:34 PM EST 2026
+
+=== Phase 6: Visualization ===
+Phase 6 done at Thu Feb 12 01:37:42 PM EST 2026
+
+=== Pipeline complete at Thu Feb 12 01:37:42 PM EST 2026 ===

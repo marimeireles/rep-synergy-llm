@@ -1,0 +1,4 @@
+=== Starting pipeline at Thu Feb 12 12:14:16 PM EST 2026 ===
+Node: ng10402, GPU: NVIDIA A100-SXM4-40GB
+
+=== Phase 1: Activation Extraction ===
