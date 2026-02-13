@@ -4,7 +4,7 @@ Unified pipeline runner for multi-model PhiID analysis.
 
 Usage:
   python scripts/run_pipeline.py --model pythia-1b --phases 1 2 3 4 6
-  python scripts/run_pipeline.py --model gemma3-4b --phases 1 2 3 4 6
+  python scripts/run_pipeline.py --model gemma3-4b --phases 1 2 3 4 6 7 9
   python scripts/run_pipeline.py --model qwen3-8b --phases 1 2 3 6
   python scripts/run_pipeline.py --model pythia-1b --revision step1000 --phases 1 2 3
 
@@ -15,6 +15,8 @@ Phases:
   4 = Ablation experiments (GPU)
   5 = Random baseline (GPU + CPU)
   6 = Visualize
+  7 = Graph analysis — Fig 3b, 3c (CPU)
+  9 = MATH perturbation — Fig 4b (GPU)
 """
 
 import argparse
@@ -48,7 +50,12 @@ from src.visualization import (
     plot_head_ranking_heatmap,
     plot_ablation_curves,
     plot_trained_vs_random,
+    plot_graph_cores,
+    plot_math_perturbation,
 )
+from src.graph_analysis import compute_graph_metrics
+from src.perturbation import GaussianNoisePerturbation
+from src.math_eval import evaluate_math_accuracy
 
 logger = logging.getLogger(__name__)
 
@@ -484,6 +491,159 @@ def phase6_visualize(config, revision=None):
     logger.info(f"All figures saved to {fig_dir}/")
 
 
+def phase7_graph_analysis(config, revision=None):
+    """Phase 7: Graph analysis of synergistic and redundant cores (Fig 3b, 3c)."""
+    model_id = config["model_id"]
+    results_dir = config["results_dir"]
+    fig_dir = os.path.join(results_dir, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
+
+    rev_suffix = f"_{revision}" if revision else ""
+
+    metrics_path = os.path.join(results_dir, "phiid_scores",
+                                f"{model_id}{rev_suffix}_graph_metrics.json")
+    fig_path = os.path.join(fig_dir, f"{model_id}{rev_suffix}_graph_cores.png")
+
+    if os.path.exists(metrics_path) and os.path.exists(fig_path):
+        logger.info(f"Graph analysis already exists. Skipping.")
+        with open(metrics_path) as f:
+            metrics = json.load(f)
+        for k, v in metrics.items():
+            logger.info(f"  {k}: {v}")
+        return
+
+    phiid_path = get_result_path(results_dir, "phiid_scores", model_id,
+                                 "pairwise_phiid.npz", revision)
+    if not os.path.exists(phiid_path):
+        logger.error(f"PhiID results not found at {phiid_path}. Run phase 2 first.")
+        return
+
+    data = np.load(phiid_path)
+    sts_matrix = data['sts_matrix']
+    rtr_matrix = data['rtr_matrix']
+    num_heads = sts_matrix.shape[0]
+
+    num_heads_per_layer, num_layers = _infer_architecture(num_heads, model_id)
+    logger.info(f"Graph analysis: {num_heads} heads, {num_layers} layers x {num_heads_per_layer} heads/layer")
+
+    # Compute graph metrics (Fig 3c)
+    metrics = compute_graph_metrics(sts_matrix, rtr_matrix, top_pct=0.1)
+
+    with open(metrics_path, 'w') as f:
+        json.dump(metrics, f, indent=2, default=float)
+    logger.info(f"Saved graph metrics to {metrics_path}")
+
+    # Generate graph visualization (Fig 3b)
+    plot_graph_cores(
+        sts_matrix, rtr_matrix,
+        num_layers=num_layers,
+        num_heads_per_layer=num_heads_per_layer,
+        top_pct=0.1,
+        title_prefix=model_id,
+        save_path=fig_path,
+    )
+
+    logger.info("Phase 7 (graph analysis) complete.")
+
+
+def phase9_math_perturbation(config, device, hf_token=None,
+                              sigma=0.1, num_problems=500,
+                              num_random_seeds=3, core_fraction=0.25):
+    """Phase 9: MATH benchmark perturbation experiment (Fig 4b)."""
+    model_id = config["model_id"]
+    results_dir = config["results_dir"]
+
+    csv_path = os.path.join(results_dir, "ablation",
+                            f"{model_id}_math_perturbation.csv")
+
+    if os.path.exists(csv_path):
+        logger.info(f"MATH perturbation results already exist at {csv_path}. Skipping.")
+        df = pd.read_csv(csv_path)
+        for _, row in df.iterrows():
+            logger.info(f"  {row['condition']}: accuracy={row['accuracy']:.4f}")
+        return
+
+    # Load head rankings
+    rankings_path = get_result_path(results_dir, "phiid_scores", model_id,
+                                    "head_rankings.csv")
+    if not os.path.exists(rankings_path):
+        logger.error(f"Head rankings not found at {rankings_path}. Run phases 1-3 first.")
+        return
+
+    rankings_df = pd.read_csv(rankings_path)
+    total_heads = len(rankings_df)
+    num_core = max(1, int(total_heads * core_fraction))
+
+    sorted_by_score = rankings_df.sort_values('syn_red_score', ascending=False)
+    synergistic_heads = sorted_by_score['head_idx'].tolist()[:num_core]
+    redundant_heads = sorted_by_score['head_idx'].tolist()[-num_core:]
+
+    logger.info(f"Core size: {num_core} / {total_heads} heads ({core_fraction*100:.0f}%)")
+
+    conditions = [
+        ("baseline", [], 42),
+        ("synergistic", synergistic_heads, 42),
+        ("redundant", redundant_heads, 42),
+    ]
+    for seed_idx in range(num_random_seeds):
+        rng = np.random.RandomState(config["seed"] + seed_idx + 100)
+        random_heads = rng.choice(total_heads, size=num_core, replace=False).tolist()
+        conditions.append(("random", random_heads, config["seed"] + seed_idx + 100))
+
+    all_results = []
+
+    for cond_name, head_indices, noise_seed in conditions:
+        logger.info(f"\n--- Condition: {cond_name} ({len(head_indices)} heads) ---")
+
+        model, tokenizer = load_model_and_tokenizer(
+            config["model_name"], device,
+            torch_dtype=config["torch_dtype"],
+            hf_token=hf_token,
+        )
+        spec = detect_model_spec(model)
+
+        if head_indices:
+            perturber = GaussianNoisePerturbation(model, spec, sigma=sigma)
+            perturber.perturb_heads(head_indices, seed=noise_seed)
+
+        accuracy, eval_results = evaluate_math_accuracy(
+            model, tokenizer, device,
+            num_problems=num_problems,
+            max_new_tokens=512,
+        )
+
+        all_results.append({
+            "condition": cond_name,
+            "accuracy": accuracy,
+            "num_correct": sum(1 for r in eval_results if r["correct"]),
+            "num_total": len(eval_results),
+            "num_heads_perturbed": len(head_indices),
+            "sigma": sigma,
+            "seed": noise_seed,
+        })
+
+        logger.info(f"  {cond_name}: accuracy = {accuracy:.4f}")
+
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    results_df = pd.DataFrame(all_results)
+    results_df.to_csv(csv_path, index=False)
+    logger.info(f"Saved MATH perturbation results to {csv_path}")
+
+    # Generate figure
+    fig_dir = os.path.join(results_dir, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
+    plot_math_perturbation(
+        results_df,
+        title=f"{model_id}: MATH Accuracy under Noise Perturbation (sigma={sigma})",
+        save_path=os.path.join(fig_dir, f"{model_id}_math_perturbation.png"),
+    )
+
+    logger.info("Phase 9 (MATH perturbation) complete.")
+
+
 def _infer_architecture(total_heads, model_id):
     """Infer (num_heads_per_layer, num_layers) from total_heads and model_id."""
     known = {
@@ -509,9 +669,13 @@ def main():
     parser.add_argument("--revision", default=None,
                         help="Model revision (e.g., step1000 for Pythia checkpoints)")
     parser.add_argument("--phases", nargs='+', type=int, required=True,
-                        help="Phases to run (1-6)")
+                        help="Phases to run (1-7, 9)")
     parser.add_argument("--max-workers", type=int, default=None,
                         help="Max parallel workers for PhiID computation")
+    parser.add_argument("--sigma", type=float, default=0.1,
+                        help="Noise sigma for MATH perturbation (phase 9, default: 0.1)")
+    parser.add_argument("--num-problems", type=int, default=500,
+                        help="Number of MATH problems (phase 9, default: 500)")
     args = parser.parse_args()
 
     setup_logging()
@@ -536,11 +700,15 @@ def main():
         4: lambda: phase4_ablation(config, device, args.revision, hf_token),
         5: lambda: phase5_random_baseline(config, device, args.revision),
         6: lambda: phase6_visualize(config, args.revision),
+        7: lambda: phase7_graph_analysis(config, args.revision),
+        9: lambda: phase9_math_perturbation(config, device, hf_token,
+                                             sigma=args.sigma,
+                                             num_problems=args.num_problems),
     }
 
     for phase_num in args.phases:
         if phase_num not in phase_map:
-            logger.error(f"Unknown phase: {phase_num}. Valid phases: 1-6")
+            logger.error(f"Unknown phase: {phase_num}. Valid phases: 1-7, 9")
             continue
         logger.info(f"{'='*60}")
         logger.info(f"Starting Phase {phase_num}")

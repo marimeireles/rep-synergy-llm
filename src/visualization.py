@@ -6,7 +6,9 @@ Reproduces figures from the paper:
 - Fig 2b: Head ranking heatmap (layers x heads)
 - Fig 2c: PhiID profile across layers (inverted-U)
 - Fig 3a: Trained vs random comparison / checkpoint progression
+- Fig 3b: Graph representation of synergistic/redundant cores
 - Fig 4a: Ablation curves
+- Fig 4b: MATH benchmark perturbation bar chart
 - Multi-model overlays
 """
 
@@ -302,3 +304,168 @@ def plot_multi_model_ablation(model_ablations, title, save_path):
     fig.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     logger.info(f"Saved multi-model ablation to {save_path}")
+
+
+def plot_graph_cores(
+    sts_matrix, rtr_matrix,
+    num_layers, num_heads_per_layer,
+    top_pct=0.1, title_prefix="", save_path=None,
+):
+    """
+    Fig 3b: Visualize synergistic and redundant cores as undirected graphs.
+    Only the top `top_pct` strongest connections are shown.
+
+    Nodes are colored by layer depth (viridis: early=purple, late=yellow).
+    Edge alpha/width scales with weight.
+
+    Args:
+        sts_matrix: (N, N) pairwise synergy matrix
+        rtr_matrix: (N, N) pairwise redundancy matrix
+        num_layers: number of layers
+        num_heads_per_layer: heads per layer
+        top_pct: fraction of strongest edges to keep (default 0.1)
+        title_prefix: model name for titles
+        save_path: output file path
+    """
+    try:
+        import networkx as nx
+        from src.graph_analysis import build_thresholded_graph, get_graph_layout, get_node_layer_colors
+    except ImportError:
+        logger.error("networkx not installed. Skipping graph core plot.")
+        return
+
+    N = sts_matrix.shape[0]
+    _, node_colors = get_node_layer_colors(N, num_layers, num_heads_per_layer)
+
+    fig, axes = plt.subplots(1, 2, figsize=(20, 9))
+
+    for ax, matrix, label, edge_cmap in [
+        (axes[0], sts_matrix, "Synergistic Core (top 10% synergy)", "Reds"),
+        (axes[1], rtr_matrix, "Redundant Core (top 10% redundancy)", "Blues"),
+    ]:
+        G = build_thresholded_graph(matrix, top_pct=top_pct)
+        pos = get_graph_layout(G, num_layers, num_heads_per_layer)
+
+        # Edge weights for alpha scaling
+        if G.number_of_edges() > 0:
+            edge_weights = np.array([d["weight"] for _, _, d in G.edges(data=True)])
+            w_min, w_max = edge_weights.min(), edge_weights.max()
+            if w_max > w_min:
+                edge_alphas = 0.1 + 0.7 * (edge_weights - w_min) / (w_max - w_min)
+            else:
+                edge_alphas = np.full_like(edge_weights, 0.4)
+            edge_widths = 0.3 + 1.5 * (edge_weights - w_min) / max(w_max - w_min, 1e-10)
+        else:
+            edge_alphas = []
+            edge_widths = []
+
+        # Draw edges with individual alpha
+        for idx, (u, v, d) in enumerate(G.edges(data=True)):
+            ax.plot(
+                [pos[u][0], pos[v][0]],
+                [pos[u][1], pos[v][1]],
+                color=plt.cm.get_cmap(edge_cmap)(0.5),
+                alpha=float(edge_alphas[idx]) if len(edge_alphas) > 0 else 0.3,
+                linewidth=float(edge_widths[idx]) if len(edge_widths) > 0 else 0.5,
+                zorder=1,
+            )
+
+        # Draw nodes
+        node_x = [pos[n][0] for n in range(N)]
+        node_y = [pos[n][1] for n in range(N)]
+        sc = ax.scatter(
+            node_x, node_y,
+            c=node_colors, cmap='viridis', s=30, zorder=2,
+            edgecolors='white', linewidths=0.3,
+        )
+
+        ax.set_title(f"{title_prefix}: {label}", fontsize=12)
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+    # Shared colorbar for layer depth
+    cbar = fig.colorbar(
+        plt.cm.ScalarMappable(cmap='viridis', norm=mcolors.Normalize(0, num_layers - 1)),
+        ax=axes, fraction=0.02, pad=0.04,
+    )
+    cbar.set_label('Layer', fontsize=11)
+
+    fig.suptitle(f"{title_prefix}: Graph Representation of Synergistic & Redundant Cores",
+                 fontsize=14, y=1.02)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    logger.info(f"Saved graph cores to {save_path}")
+
+
+def plot_math_perturbation(results_df, title, save_path):
+    """
+    Fig 4b: Bar chart of MATH accuracy under different perturbation conditions.
+
+    X-axis: Perturbation condition (Baseline, Synergistic, Redundant, Random)
+    Y-axis: MATH accuracy (%)
+    Random bars show error bars (std across seeds).
+
+    Args:
+        results_df: DataFrame with columns: condition, accuracy, seed (optional)
+        title: figure title
+        save_path: output file path
+    """
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    conditions_order = ['baseline', 'synergistic', 'redundant', 'random']
+    condition_labels = {
+        'baseline': 'Baseline\n(no perturbation)',
+        'synergistic': 'Synergistic\ncore (top 25%)',
+        'redundant': 'Redundant\ncore (top 25%)',
+        'random': 'Random\nsubset (25%)',
+    }
+    condition_colors = {
+        'baseline': '#4a4a4a',
+        'synergistic': '#d62728',
+        'redundant': '#1f77b4',
+        'random': '#7f7f7f',
+    }
+
+    x_positions = []
+    bar_heights = []
+    bar_errors = []
+    bar_labels = []
+    bar_colors = []
+
+    for i, cond in enumerate(conditions_order):
+        cond_data = results_df[results_df['condition'] == cond]
+        if cond_data.empty:
+            continue
+
+        mean_acc = cond_data['accuracy'].mean() * 100
+        std_acc = cond_data['accuracy'].std() * 100 if len(cond_data) > 1 else 0
+
+        x_positions.append(i)
+        bar_heights.append(mean_acc)
+        bar_errors.append(std_acc)
+        bar_labels.append(condition_labels.get(cond, cond))
+        bar_colors.append(condition_colors.get(cond, 'gray'))
+
+    bars = ax.bar(x_positions, bar_heights, yerr=bar_errors,
+                  color=bar_colors, capsize=5, edgecolor='black', linewidth=0.5,
+                  width=0.6, alpha=0.85)
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(bar_labels, fontsize=10)
+    ax.set_ylabel('MATH Accuracy (%)', fontsize=12)
+    ax.set_title(title, fontsize=14)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # Add value labels on bars
+    for bar, h, err in zip(bars, bar_heights, bar_errors):
+        label = f"{h:.1f}%"
+        if err > 0:
+            label += f"\n({err:.1f})"  # noqa: UP032
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + err + 0.5,
+                label, ha='center', va='bottom', fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    logger.info(f"Saved MATH perturbation chart to {save_path}")
