@@ -3,6 +3,8 @@ Head ablation and behaviour divergence measurement.
 
 Ablates attention heads by zeroing out their outputs and measures
 KL divergence between original and ablated output distributions.
+
+Supports GPT-NeoX (Pythia), Gemma 3, and Qwen 3 architectures via ModelSpec.
 """
 
 import logging
@@ -13,6 +15,8 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+
+from src.model_registry import ModelSpec, detect_model_spec
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +29,23 @@ class HeadAblationEngine:
     We compare output distributions, not generated text.
     """
 
-    def __init__(self, model, tokenizer, device):
+    def __init__(self, model, tokenizer, device, model_spec: ModelSpec = None):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self._hooks = []
 
-        config = model.config
-        self.num_layers = config.num_hidden_layers
-        self.num_heads = config.num_attention_heads
-        self.head_dim = config.hidden_size // config.num_attention_heads
+        if model_spec is None:
+            model_spec = detect_model_spec(model)
+        self.spec = model_spec
+
+        self.num_layers = self.spec.num_layers
+        self.num_heads = self.spec.num_heads
+        self.head_dim = self.spec.head_dim
 
     def _register_ablation_hooks(self, heads_to_ablate):
         """
-        Register pre-forward hooks on the dense (output projection) layer
+        Register pre-forward hooks on the output projection layer
         that zero out specified attention heads' contributions before projection.
 
         Args:
@@ -58,22 +65,22 @@ class HeadAblationEngine:
                 continue
 
             heads_in_layer = layer_heads[layer_idx]
-            dense_module = self.model.gpt_neox.layers[layer_idx].attention.dense
+            hook_module = self.spec.get_hook_module(self.model, layer_idx)
 
             def make_hook(head_indices, n_heads, h_dim):
                 def hook_fn(module, args):
-                    # args[0] shape: (batch, seq_len, hidden_size)
-                    # Modify input to zero out specific heads before dense projection
+                    # args[0] shape: (batch, seq_len, num_heads * head_dim)
+                    # Modify input to zero out specific heads before projection
                     x = args[0].clone()
-                    batch, seq_len, hidden = x.shape
+                    batch, seq_len, _ = x.shape
                     x = x.view(batch, seq_len, n_heads, h_dim)
                     for h_idx in head_indices:
                         x[:, :, h_idx, :] = 0.0
-                    x = x.view(batch, seq_len, hidden)
+                    x = x.view(batch, seq_len, -1)
                     return (x,) + args[1:]
                 return hook_fn
 
-            handle = dense_module.register_forward_pre_hook(
+            handle = hook_module.register_forward_pre_hook(
                 make_hook(heads_in_layer, self.num_heads, self.head_dim)
             )
             self._hooks.append(handle)
@@ -109,21 +116,17 @@ class HeadAblationEngine:
             prompt_ids = prompt_tokens.squeeze().tolist()
 
         # Full input: prompt + all generated tokens except the last
-        # At position len(prompt)-1, the model predicts the first generated token
-        # At position len(prompt)+t-1, the model predicts generated token t
         full_ids = prompt_ids + list(original_token_sequence[:-1])
         input_ids = torch.tensor([full_ids], device=self.device)
 
         outputs = self.model(input_ids=input_ids, use_cache=False)
 
         # Extract logits at positions corresponding to generated tokens
-        # The logit at position len(prompt)-1 predicts the first generated token
         prompt_len = len(prompt_ids)
         num_steps = len(original_token_sequence)
-        # Positions: prompt_len-1, prompt_len, ..., prompt_len+num_steps-2
         start_pos = prompt_len - 1
         end_pos = start_pos + num_steps
-        ablated_logits = outputs.logits[0, start_pos:end_pos, :].cpu().numpy()
+        ablated_logits = outputs.logits[0, start_pos:end_pos, :].cpu().float().numpy()
 
         self._remove_hooks()
 
@@ -172,9 +175,10 @@ class HeadAblationEngine:
                                original_tokens_per_prompt,
                                original_logits_per_prompt,
                                head_order, order_name='syn_red',
-                               num_layers=None, num_heads_per_layer=None):
+                               num_layers=None, num_heads_per_layer=None,
+                               step_size=1):
         """
-        Iteratively remove heads one at a time in the given order.
+        Iteratively remove heads in the given order.
 
         Args:
             prompts: list of prompt strings
@@ -185,6 +189,8 @@ class HeadAblationEngine:
             order_name: label for this ordering
             num_layers: number of layers
             num_heads_per_layer: heads per layer
+            step_size: measure KL every N heads removed (default 1).
+                       Use >1 for large models (e.g., Qwen 3 with 1,152 heads).
 
         Returns:
             list of dicts with keys: num_heads_removed, mean_kl_div, order_type
@@ -212,6 +218,10 @@ class HeadAblationEngine:
             head_in_layer = head_idx % num_heads_per_layer
             ablated_set.add((layer, head_in_layer))
 
+            # Only measure at step_size intervals or at the last head
+            if (k + 1) % step_size != 0 and (k + 1) != total_heads:
+                continue
+
             # Compute divergence for each prompt
             kl_values = []
             for p_idx in range(num_prompts):
@@ -230,7 +240,7 @@ class HeadAblationEngine:
                 'order_type': order_name,
             })
 
-            if (k + 1) % 16 == 0:
+            if (k + 1) % max(16, step_size) == 0:
                 logger.info(
                     f"  [{order_name}] Removed {k+1}/{total_heads} heads, "
                     f"mean KL = {mean_kl:.4f}"

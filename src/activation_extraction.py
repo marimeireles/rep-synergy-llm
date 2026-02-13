@@ -5,6 +5,8 @@ For each attention head h at generation step t, we capture:
     a(h, t) = ||softmax(Q_h K_h^T / sqrt(d_k)) V_h||_2
 
 This is the L2 norm of the attention-weighted value vector for that head.
+
+Supports GPT-NeoX (Pythia), Gemma 3, and Qwen 3 architectures via ModelSpec.
 """
 
 import logging
@@ -14,6 +16,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from src.model_registry import ModelSpec, detect_model_spec
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,63 +25,43 @@ class HeadActivationExtractor:
     """
     Extracts per-attention-head activation norms during autoregressive generation.
 
-    Works with Pythia (GPT-NeoX architecture). Hooks capture the per-head
-    attention output BEFORE the output projection combines them.
+    Uses ModelSpec for architecture-agnostic hook placement. Hooks capture the
+    per-head attention output BEFORE the output projection combines them.
     """
 
-    def __init__(self, model, tokenizer, device):
+    def __init__(self, model, tokenizer, device, model_spec: ModelSpec = None):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
 
-        # Pythia-1B: 16 layers, 16 heads per layer
-        config = model.config
-        self.num_layers = config.num_hidden_layers
-        self.num_heads = config.num_attention_heads
-        self.head_dim = config.hidden_size // config.num_attention_heads
-        self.num_total_heads = self.num_layers * self.num_heads
+        if model_spec is None:
+            model_spec = detect_model_spec(model)
+        self.spec = model_spec
+
+        self.num_layers = self.spec.num_layers
+        self.num_heads = self.spec.num_heads
+        self.head_dim = self.spec.head_dim
+        self.num_total_heads = self.spec.num_total_heads
 
         # Storage for current generation step's activations
         self._current_step_norms = {}
         self._hooks = []
 
     def _register_hooks(self):
-        """Register forward hooks on all attention layers."""
+        """Register forward hooks on all attention output projection layers."""
         self._remove_hooks()
 
         for layer_idx in range(self.num_layers):
-            attn_module = self.model.gpt_neox.layers[layer_idx].attention
-
-            def make_hook(l_idx):
-                def hook_fn(module, input, output):
-                    # GPTNeoXAttention.forward returns (attn_output, present)
-                    # attn_output shape: (batch, seq_len, hidden_size)
-                    # But we need per-head outputs. We hook into the attention
-                    # computation by intercepting the output and reshaping.
-                    #
-                    # The attn_output at this point has already been through
-                    # the dense (output projection). We need to go deeper.
-                    #
-                    # Instead, we'll use a hook on the internal attention
-                    # computation. For GPTNeoX, the attention weighted values
-                    # before the output projection are available if we hook
-                    # at the right point.
-                    #
-                    # Actually, let's use a different approach: hook into the
-                    # dense layer and capture its INPUT, which is the per-head
-                    # concatenated attention output before projection.
-                    pass
-                return hook_fn
-
-            # Better approach: hook the dense (output projection) layer's input
-            dense_module = attn_module.dense
+            hook_module = self.spec.get_hook_module(self.model, layer_idx)
 
             def make_dense_hook(l_idx):
                 def hook_fn(module, input, output):
-                    # input[0] shape: (batch, seq_len, hidden_size)
-                    # This is the concatenated per-head outputs before projection
-                    attn_concat = input[0]  # (batch, seq_len, hidden_size)
-                    batch_size, seq_len, hidden = attn_concat.shape
+                    # input[0] shape: (batch, seq_len, num_heads * head_dim)
+                    # This is the concatenated per-head outputs before projection.
+                    # NOTE: For GQA models, this is still the full output of all
+                    # attention heads (num_attention_heads, not num_kv_heads).
+                    attn_concat = input[0]  # (batch, seq_len, num_heads * head_dim)
+                    batch_size, seq_len, _ = attn_concat.shape
 
                     # Reshape to (batch, seq_len, num_heads, head_dim)
                     attn_per_head = attn_concat.view(
@@ -96,7 +80,7 @@ class HeadActivationExtractor:
 
                 return hook_fn
 
-            handle = dense_module.register_forward_hook(make_dense_hook(layer_idx))
+            handle = hook_module.register_forward_hook(make_dense_hook(layer_idx))
             self._hooks.append(handle)
 
     def _remove_hooks(self):
@@ -153,7 +137,7 @@ class HeadActivationExtractor:
 
             # Get logits for the last position
             logits = outputs.logits[:, -1, :]  # (1, vocab_size)
-            all_logits.append(logits[0].detach().cpu().numpy())
+            all_logits.append(logits[0].detach().cpu().float().numpy())
 
             # Greedy decoding
             next_token = torch.argmax(logits, dim=-1).item()

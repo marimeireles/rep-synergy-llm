@@ -27,32 +27,101 @@ def get_device(device_config: str = "auto") -> torch.device:
     return torch.device(device_config)
 
 
-def load_model_and_tokenizer(model_name: str, device: torch.device = None):
+def load_model_and_tokenizer(model_name: str, device: torch.device = None,
+                              revision: str = None, torch_dtype: str = "float32",
+                              hf_token: str = None):
     """
     Load a HuggingFace causal LM and its tokenizer.
-    Returns (model, tokenizer) with model in eval mode on the given device.
+
+    Args:
+        model_name: HuggingFace model ID (e.g., "EleutherAI/pythia-1b")
+        device: target device (auto-detected if None)
+        revision: model revision/checkpoint (e.g., "step1000" for Pythia)
+        torch_dtype: dtype string — "float32", "float16", or "bfloat16"
+        hf_token: HuggingFace access token (for gated models like Gemma)
+
+    Returns:
+        (model, tokenizer) with model in eval mode on the given device
     """
     if device is None:
         device = get_device()
 
-    logger.info(f"Loading model: {model_name}")
+    dtype_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    pt_dtype = dtype_map.get(torch_dtype, torch.float32)
+
+    rev_str = f" (revision={revision})" if revision else ""
+    logger.info(f"Loading model: {model_name}{rev_str} with dtype={torch_dtype}")
+
     # Use local_files_only when TRANSFORMERS_OFFLINE is set (compute nodes have no internet)
     local_only = os.environ.get("TRANSFORMERS_OFFLINE", "0") == "1"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=local_only)
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        revision=revision,
+        local_files_only=local_only,
+        token=hf_token,
+    )
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float32,
+        revision=revision,
+        torch_dtype=pt_dtype,
         local_files_only=local_only,
+        token=hf_token,
     )
     model = model.to(device)
     model.eval()
 
-    # Pythia tokenizer doesn't have a pad token by default
+    # Many tokenizers don't have a pad token by default
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     logger.info(f"Model loaded on {device}. Parameters: {sum(p.numel() for p in model.parameters()):,}")
     return model, tokenizer
+
+
+def get_result_path(results_dir: str, subdir: str, model_id: str,
+                    suffix: str, revision: str = None) -> str:
+    """
+    Build a result file path with model_id and optional revision.
+
+    Examples:
+        get_result_path("results", "activations", "pythia1b", "activations.npz")
+        -> "results/activations/pythia1b_activations.npz"
+
+        get_result_path("results", "activations", "pythia1b", "activations.npz", "step1000")
+        -> "results/activations/pythia1b_step1000_activations.npz"
+    """
+    if revision:
+        filename = f"{model_id}_{revision}_{suffix}"
+    else:
+        filename = f"{model_id}_{suffix}"
+    return os.path.join(results_dir, subdir, filename)
+
+
+def load_dotenv(path: str = ".env"):
+    """
+    Load variables from a .env file into os.environ.
+    Skips blank lines and comments (#). No external dependency needed.
+    """
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if '=' not in line:
+                continue
+            key, _, value = line.partition('=')
+            key = key.strip()
+            value = value.strip()
+            # Don't overwrite vars already set in the shell
+            if key not in os.environ:
+                os.environ[key] = value
 
 
 def setup_logging(level=logging.INFO):
