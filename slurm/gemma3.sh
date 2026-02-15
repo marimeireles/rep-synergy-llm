@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=gemma3-phiid
-#SBATCH --account=def-bhrett
+#SBATCH --account=def-zhijing_gpu
 #SBATCH --time=12:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=32
@@ -21,6 +21,9 @@ micromamba activate syn
 
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
 
 cd /home/marimeir/scratch/rep-synergy-llm
 mkdir -p slurm/logs

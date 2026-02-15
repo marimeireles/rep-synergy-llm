@@ -55,7 +55,7 @@ MODEL_CONFIGS = {
     "gemma3-4b": {
         "model_name": "google/gemma-3-4b-pt",
         "model_id": "gemma3_4b",
-        "torch_dtype": "float16",
+        "torch_dtype": "bfloat16",
     },
     "qwen3-8b": {
         "model_name": "Qwen/Qwen3-8B",

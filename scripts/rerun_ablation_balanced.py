@@ -46,20 +46,35 @@ def main():
         'pythia-1b': {
             'model_name': 'EleutherAI/pythia-1b',
             'prefix': 'pythia1b',
+            'dtype': torch.float32,
         },
         'qwen3-8b': {
             'model_name': 'Qwen/Qwen3-8B',
             'prefix': 'qwen3_8b',
+            'dtype': torch.float16,
+        },
+        'gemma3-4b': {
+            'model_name': 'google/gemma-3-4b-pt',
+            'prefix': 'gemma3_4b',
+            'dtype': torch.bfloat16,
         },
     }
 
     cfg = MODEL_CONFIGS[args.model]
     prefix = cfg['prefix']
 
+    # Load .env for HF_TOKEN (gated models like Gemma)
+    from src.utils import load_dotenv
+    load_dotenv()
+    hf_token = os.environ.get('HF_TOKEN')
+    local_only = os.environ.get('TRANSFORMERS_OFFLINE', '0') == '1'
+
     logger.info(f"Loading model: {cfg['model_name']}")
-    tokenizer = AutoTokenizer.from_pretrained(cfg['model_name'])
+    tokenizer = AutoTokenizer.from_pretrained(
+        cfg['model_name'], local_files_only=local_only, token=hf_token)
     model = AutoModelForCausalLM.from_pretrained(
-        cfg['model_name'], torch_dtype=torch.float16, device_map='auto'
+        cfg['model_name'], dtype=cfg['dtype'], device_map='auto',
+        local_files_only=local_only, token=hf_token,
     )
     model.eval()
 

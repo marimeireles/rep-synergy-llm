@@ -3,7 +3,7 @@ Architecture detection and hook point abstraction for multi-model support.
 
 Supports:
 - GPT-NeoX (Pythia): model.gpt_neox.layers[i].attention.dense
-- Gemma 3:           model.model.layers[i].self_attn.o_proj
+- Gemma 3:           model.model.language_model.layers[i].self_attn.o_proj (multimodal)
 - Qwen 3:            model.model.layers[i].self_attn.o_proj
 """
 
@@ -33,7 +33,15 @@ class ModelSpec:
         """
         if self.model_type == "gpt_neox":
             return model.gpt_neox.layers[layer_idx].attention.dense
-        elif self.model_type in ("gemma3", "qwen3"):
+        elif self.model_type == "gemma3":
+            # Gemma 3 multimodal (Gemma3ForConditionalGeneration):
+            #   model.model (Gemma3Model) -> .language_model (Gemma3TextModel) -> .layers
+            if hasattr(model, 'model') and hasattr(model.model, 'language_model'):
+                return model.model.language_model.layers[layer_idx].self_attn.o_proj
+            # Gemma 3 text-only (Gemma3ForCausalLM):
+            #   model.model -> .layers
+            return model.model.layers[layer_idx].self_attn.o_proj
+        elif self.model_type == "qwen3":
             return model.model.layers[layer_idx].self_attn.o_proj
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
@@ -79,6 +87,11 @@ def detect_model_spec(model) -> ModelSpec:
             num_heads = text_config.num_attention_heads
             head_dim = hidden_size // num_heads
             model_type = "gpt_neox"
+        elif hasattr(model, 'language_model') and hasattr(model.language_model, 'layers'):
+            # Multimodal wrapper (e.g., Gemma3ForConditionalGeneration)
+            num_heads = text_config.num_attention_heads
+            head_dim = getattr(text_config, 'head_dim', hidden_size // num_heads)
+            model_type = "gemma3"
         elif hasattr(model, 'model') and hasattr(model.model, 'layers'):
             num_heads = text_config.num_attention_heads
             head_dim = getattr(text_config, 'head_dim', hidden_size // num_heads)

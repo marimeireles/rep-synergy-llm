@@ -73,7 +73,8 @@ class HeadActivationExtractor:
                     last_pos = attn_per_head[:, -1, :, :]
 
                     # L2 norm per head: (batch, num_heads)
-                    norms = torch.norm(last_pos, dim=-1)  # L2 norm over head_dim
+                    # Cast to float32 to avoid overflow in float16/bfloat16
+                    norms = torch.norm(last_pos.float(), dim=-1)  # L2 norm over head_dim
 
                     # Store norms (take batch dim 0 since batch=1)
                     self._current_step_norms[l_idx] = norms[0].detach().cpu().numpy()

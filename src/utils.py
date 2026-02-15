@@ -68,7 +68,7 @@ def load_model_and_tokenizer(model_name: str, device: torch.device = None,
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         revision=revision,
-        torch_dtype=pt_dtype,
+        dtype=pt_dtype,
         local_files_only=local_only,
         token=hf_token,
     )
