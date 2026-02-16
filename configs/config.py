@@ -62,6 +62,16 @@ MODEL_CONFIGS = {
         "model_id": "qwen3_8b",
         "torch_dtype": "float16",
     },
+    "gemma3-4b-it": {
+        "model_name": "google/gemma-3-4b-it",
+        "model_id": "gemma3_4b_it",
+        "torch_dtype": "bfloat16",
+    },
+    "gemma3-12b-it": {
+        "model_name": "google/gemma-3-12b-it",
+        "model_id": "gemma3_12b_it",
+        "torch_dtype": "bfloat16",
+    },
 }
 
 # Pythia-1B training checkpoints for Figure 3a

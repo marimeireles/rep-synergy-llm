@@ -58,6 +58,16 @@ def main():
             'prefix': 'gemma3_4b',
             'dtype': torch.bfloat16,
         },
+        'gemma3-4b-it': {
+            'model_name': 'google/gemma-3-4b-it',
+            'prefix': 'gemma3_4b_it',
+            'dtype': torch.bfloat16,
+        },
+        'gemma3-12b-it': {
+            'model_name': 'google/gemma-3-12b-it',
+            'prefix': 'gemma3_12b_it',
+            'dtype': torch.bfloat16,
+        },
     }
 
     cfg = MODEL_CONFIGS[args.model]
