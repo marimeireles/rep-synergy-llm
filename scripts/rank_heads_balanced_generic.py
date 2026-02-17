@@ -31,7 +31,7 @@ ARCHITECTURES = {
     "pythia1b": (8, 16),
     "gemma3_4b": (8, 34),
     "gemma3_4b_it": (8, 34),
-    "gemma3_12b_it": (8, 26),
+    "gemma3_12b_it": (16, 48),
     "qwen3_8b": (32, 36),
 }
 

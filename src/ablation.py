@@ -1,8 +1,13 @@
 """
 Head ablation and behaviour divergence measurement.
 
-Ablates attention heads by zeroing out their outputs and measures
-KL divergence between original and ablated output distributions.
+Supports two ablation methods:
+1. 'zero': Zero out attention head outputs (our original method)
+2. 'noise': Inject Gaussian noise into query-output projections (paper's method)
+
+The paper states: "injecting Gaussian noise into the query-output projections
+of selected attention heads" — this means adding noise to the per-head output
+vectors before the output projection merges them.
 
 Supports GPT-NeoX (Pythia), Gemma 3, and Qwen 3 architectures via ModelSpec.
 """
@@ -27,13 +32,20 @@ class HeadAblationEngine:
 
     The ablated model is conditioned on the NON-ABLATED model's token sequence.
     We compare output distributions, not generated text.
+
+    Supports two ablation methods:
+    - 'zero': Set head outputs to zero
+    - 'noise': Add Gaussian noise scaled to each head's activation std
     """
 
-    def __init__(self, model, tokenizer, device, model_spec: ModelSpec = None):
+    def __init__(self, model, tokenizer, device, model_spec: ModelSpec = None,
+                 ablation_method='zero', noise_scale=1.0):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self._hooks = []
+        self.ablation_method = ablation_method
+        self.noise_scale = noise_scale
 
         if model_spec is None:
             model_spec = detect_model_spec(model)
@@ -43,10 +55,81 @@ class HeadAblationEngine:
         self.num_heads = self.spec.num_heads
         self.head_dim = self.spec.head_dim
 
+        # Per-head activation statistics for noise calibration (computed lazily)
+        self._head_stds = None
+
+    def calibrate_noise(self, prompt_token_ids, original_tokens_per_prompt, num_calibration_prompts=10):
+        """
+        Estimate per-layer, per-head activation std from a few prompts.
+        Used to scale Gaussian noise to match the activation magnitude.
+
+        Stores a dict: (layer_idx, head_idx) -> std (scalar)
+        """
+        logger.info("Calibrating noise scale from activation statistics...")
+        head_values = {}  # (layer, head) -> list of values
+
+        # Register hooks to collect activation norms
+        collect_hooks = []
+        collected = {}
+
+        for layer_idx in range(self.num_layers):
+            hook_module = self.spec.get_hook_module(self.model, layer_idx)
+
+            def make_collect_hook(li, n_heads, h_dim):
+                def hook_fn(module, args):
+                    x = args[0]  # (batch, seq_len, num_heads * head_dim)
+                    batch, seq_len, _ = x.shape
+                    x_heads = x.view(batch, seq_len, n_heads, h_dim)
+                    # Store per-head std across the sequence dimension
+                    for h in range(n_heads):
+                        head_data = x_heads[0, :, h, :].detach()  # (seq_len, head_dim)
+                        key = (li, h)
+                        if key not in collected:
+                            collected[key] = []
+                        collected[key].append(head_data.float().std().item())
+                    return None  # don't modify
+                return hook_fn
+
+            handle = hook_module.register_forward_pre_hook(
+                make_collect_hook(layer_idx, self.num_heads, self.head_dim)
+            )
+            collect_hooks.append(handle)
+
+        # Run a few prompts through the model
+        n = min(num_calibration_prompts, len(prompt_token_ids))
+        with torch.no_grad():
+            for p_idx in range(n):
+                prompt_ids = prompt_token_ids[p_idx]
+                gen_tokens = original_tokens_per_prompt[p_idx]
+                full_ids = list(prompt_ids) + list(gen_tokens[:-1])
+                input_ids = torch.tensor([full_ids], device=self.device)
+                self.model(input_ids=input_ids, use_cache=False)
+
+        # Remove collection hooks
+        for h in collect_hooks:
+            h.remove()
+
+        # Compute mean std per head
+        self._head_stds = {}
+        for key, vals in collected.items():
+            self._head_stds[key] = np.mean(vals)
+
+        # Log summary
+        layer_mean_stds = {}
+        for (l, h), std in self._head_stds.items():
+            if l not in layer_mean_stds:
+                layer_mean_stds[l] = []
+            layer_mean_stds[l].append(std)
+        overall_mean = np.mean([v for v in self._head_stds.values()])
+        logger.info(f"Calibration done: mean activation std = {overall_mean:.4f} "
+                    f"(across {len(self._head_stds)} heads, {n} prompts)")
+
     def _register_ablation_hooks(self, heads_to_ablate):
         """
-        Register pre-forward hooks on the output projection layer
-        that zero out specified attention heads' contributions before projection.
+        Register pre-forward hooks on the output projection layer.
+
+        For 'zero' method: zero out specified heads' contributions.
+        For 'noise' method: add Gaussian noise scaled to head activation std.
 
         Args:
             heads_to_ablate: set of (layer_idx, head_within_layer_idx) tuples
@@ -67,18 +150,40 @@ class HeadAblationEngine:
             heads_in_layer = layer_heads[layer_idx]
             hook_module = self.spec.get_hook_module(self.model, layer_idx)
 
-            def make_hook(head_indices, n_heads, h_dim):
-                def hook_fn(module, args):
-                    # args[0] shape: (batch, seq_len, num_heads * head_dim)
-                    # Modify input to zero out specific heads before projection
-                    x = args[0].clone()
-                    batch, seq_len, _ = x.shape
-                    x = x.view(batch, seq_len, n_heads, h_dim)
-                    for h_idx in head_indices:
-                        x[:, :, h_idx, :] = 0.0
-                    x = x.view(batch, seq_len, -1)
-                    return (x,) + args[1:]
-                return hook_fn
+            if self.ablation_method == 'zero':
+                def make_hook(head_indices, n_heads, h_dim):
+                    def hook_fn(module, args):
+                        x = args[0].clone()
+                        batch, seq_len, _ = x.shape
+                        x = x.view(batch, seq_len, n_heads, h_dim)
+                        for h_idx in head_indices:
+                            x[:, :, h_idx, :] = 0.0
+                        x = x.view(batch, seq_len, -1)
+                        return (x,) + args[1:]
+                    return hook_fn
+
+            elif self.ablation_method == 'noise':
+                # Get per-head noise scales for this layer
+                head_noise_scales = {}
+                for h_idx in heads_in_layer:
+                    if self._head_stds is not None and (layer_idx, h_idx) in self._head_stds:
+                        head_noise_scales[h_idx] = self._head_stds[(layer_idx, h_idx)] * self.noise_scale
+                    else:
+                        head_noise_scales[h_idx] = self.noise_scale
+
+                def make_hook(head_indices, n_heads, h_dim, noise_scales=head_noise_scales):
+                    def hook_fn(module, args):
+                        x = args[0].clone()
+                        batch, seq_len, _ = x.shape
+                        x = x.view(batch, seq_len, n_heads, h_dim)
+                        for h_idx in head_indices:
+                            noise = torch.randn_like(x[:, :, h_idx, :]) * noise_scales[h_idx]
+                            x[:, :, h_idx, :] = x[:, :, h_idx, :] + noise
+                        x = x.view(batch, seq_len, -1)
+                        return (x,) + args[1:]
+                    return hook_fn
+            else:
+                raise ValueError(f"Unknown ablation method: {self.ablation_method}")
 
             handle = hook_module.register_forward_pre_hook(
                 make_hook(heads_in_layer, self.num_heads, self.head_dim)
