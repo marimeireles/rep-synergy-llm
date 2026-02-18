@@ -34,15 +34,12 @@ MODELS = {
         "num_layers": 36,
         "color": "tab:orange",
     },
-    # NOTE: Gemma 3 12B-IT results were generated with WRONG architecture
-    # (8 heads x 26 layers = 208 instead of correct 16 heads x 48 layers = 768).
-    # Excluded from final results until re-run with correct architecture.
-    # "gemma3_12b_it": {
-    #     "label": "Gemma 3 12B (instruct)",
-    #     "num_heads_per_layer": 16,
-    #     "num_layers": 48,
-    #     "color": "tab:green",
-    # },
+    "gemma3_12b_it": {
+        "label": "Gemma 3 12B (instruct)",
+        "num_heads_per_layer": 16,
+        "num_layers": 48,
+        "color": "tab:green",
+    },
 }
 
 
